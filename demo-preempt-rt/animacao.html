@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Linux RT passo a passo</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<style>
+/* Layout: um "visualizador de trace" (estilo KernelShark): abas de cenário, alternância de modo, linha do tempo em SVG e narração passo a passo */
+:root{
+  --bg:#F6F7F9; --surface:#FFFFFF; --fg:#16202E; --muted:#5B6676; --line:#DCE1E8;
+  --rt:#1E56B0; --rt-soft:#DCE7F8; --normal:#7A8494; --crit:#D98A12; --irq:#7B3FB5;
+  --bad:#C0392B; --good:#1E7D4F; --cursor:#C0392B;
+  --f-sans:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --f-mono:"IBM Plex Mono",ui-monospace,"SFMono-Regular",Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#0F141B; --surface:#171E28; --fg:#E7ECF3; --muted:#9AA6B6; --line:#2A3442;
+  --rt:#6E9EF0; --rt-soft:#1D2D4A; --normal:#8E99A9; --crit:#F0A93A; --irq:#B48AE6;
+  --bad:#F07467; --good:#5CC48F; --cursor:#F07467; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0F141B; --surface:#171E28; --fg:#E7ECF3; --muted:#9AA6B6; --line:#2A3442;
+  --rt:#6E9EF0; --rt-soft:#1D2D4A; --normal:#8E99A9; --crit:#F0A93A; --irq:#B48AE6;
+  --bad:#F07467; --good:#5CC48F; --cursor:#F07467; color-scheme:dark}
+body{background:var(--bg);color:var(--fg);font-family:var(--f-sans);font-size:16px;line-height:1.5}
+.wrap{max-width:1080px;margin:0 auto;padding-block:28px 48px;
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));
+  display:flex;flex-direction:column;gap:20px}
+header h1{font-size:clamp(1.6rem,3.5vw,2.3rem);margin:0;letter-spacing:-.01em;text-wrap:balance}
+header p{margin:6px 0 0;color:var(--muted);max-width:68ch}
+.tabs{display:flex;gap:8px;flex-wrap:wrap}
+.tab{font:600 15px var(--f-sans);padding:9px 16px;border-radius:999px;border:1px solid var(--line);
+  background:var(--surface);color:var(--fg);cursor:pointer}
+.tab[aria-selected="true"]{background:var(--rt);border-color:var(--rt);color:#fff}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:20px;display:flex;flex-direction:column;gap:16px;min-width:0}
+.row{display:flex;gap:12px;flex-wrap:wrap;align-items:center;justify-content:space-between}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.seg button{font:500 14px var(--f-sans);padding:8px 14px;border:0;background:transparent;color:var(--fg);cursor:pointer}
+.seg button[aria-pressed="true"]{background:var(--rt-soft);color:var(--rt);font-weight:700}
+.ctrls{display:flex;gap:8px;flex-wrap:wrap}
+.ctrls button{font:600 14px var(--f-sans);padding:8px 14px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--fg);cursor:pointer}
+.ctrls button.primary{background:var(--rt);border-color:var(--rt);color:#fff}
+button:focus-visible{outline:3px solid var(--rt);outline-offset:2px}
+.chart{overflow-x:auto}
+svg{display:block;width:100%;min-width:640px;height:auto}
+svg text{font-family:var(--f-mono);fill:var(--fg)}
+.grid{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);gap:16px}
+@media (max-width:760px){.grid{grid-template-columns:1fr}}
+ol.steps{margin:0;padding-left:1.4em;display:flex;flex-direction:column;gap:6px;color:var(--muted)}
+ol.steps li.done{color:var(--fg)}
+ol.steps li.now{color:var(--fg);font-weight:600}
+.result{border-radius:12px;padding:14px 16px;background:var(--bg);border:1px solid var(--line);display:flex;flex-direction:column;gap:4px}
+.result .big{font:600 2rem var(--f-mono);font-variant-numeric:tabular-nums}
+.result .big.bad{color:var(--bad)} .result .big.good{color:var(--good)}
+.result small{color:var(--muted)}
+.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:13px;color:var(--muted)}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.sw{width:14px;height:14px;border-radius:3px;display:inline-block}
+.note{font-size:13px;color:var(--muted)}
+code{font-family:var(--f-mono);font-size:.92em}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header>
+    <h1>Linux de tempo real, passo a passo</h1>
+    <p>Duas animações para o seminário sobre o artigo <em>The Real-Time Linux Kernel: A Survey on PREEMPT_RT</em>. Escolha o cenário, alterne o modo e aperte <strong>Reproduzir</strong> ou avance um passo de cada vez. Os tempos são ilustrativos.</p>
+  </header>
+
+  <div class="tabs" role="tablist">
+    <button class="tab" role="tab" id="tab-lat" aria-selected="true">1. Latência de ativação</button>
+    <button class="tab" role="tab" id="tab-pi" aria-selected="false">2. Inversão de prioridade</button>
+  </div>
+
+  <section class="panel">
+    <div class="row">
+      <div class="seg" id="modes"></div>
+      <div class="ctrls">
+        <button id="b-play" class="primary">Reproduzir</button>
+        <button id="b-step">Próximo passo</button>
+        <button id="b-reset">Reiniciar</button>
+      </div>
+    </div>
+    <div class="chart"><svg id="svg" viewBox="0 0 900 300" role="img" aria-label="Linha do tempo das tarefas"></svg></div>
+    <div class="legend" id="legend"></div>
+    <div class="grid">
+      <ol class="steps" id="steps"></ol>
+      <div class="result" id="result"></div>
+    </div>
+    <p class="note" id="note"></p>
+  </section>
+</div>
+
+<script>
+// Cada cenário: linhas (tarefas), modos, e para cada modo uma lista de segmentos e eventos narrados.
+// Segmento: {row, t0, t1, kind}  kind: run | crit | irq | blocked
+const SCEN = {
+  lat: {
+    rows: ["Tarefa RT (FIFO 80)", "IRQ do timer", "Tarefa comum"],
+    tmax: 20,
+    modes: {
+      comum: {
+        label: "Kernel comum (CONFIG_PREEMPT)",
+        segs: [
+          {row:2,t0:0,t1:3,kind:"run"},
+          {row:2,t0:3,t1:5,kind:"crit"},
+          {row:1,t0:5,t1:6,kind:"irq"},
+          {row:0,t0:6,t1:13,kind:"blocked"},
+          {row:2,t0:6,t1:13,kind:"crit"},
+          {row:0,t0:13,t1:17,kind:"run"},
+          {row:2,t0:17,t1:20,kind:"run"}
+        ],
+        arrows:[{row:0,t:5,label:"acorda"}],
+        steps:[
+          {t:3, text:"A tarefa comum faz uma chamada de sistema e entra numa seção crítica protegida por spinlock: o kernel não pode ser preemptado ali."},
+          {t:5, text:"O timer dispara. A interrupção acorda a tarefa de tempo real, que tem prioridade maior."},
+          {t:6, text:"Mesmo com prioridade maior, a tarefa RT espera: o spinlock desliga a preempção até ser liberado."},
+          {t:13, text:"Só quando a seção crítica termina o kernel troca de tarefa. A tarefa RT finalmente roda."},
+          {t:20, text:"Resultado: o atraso depende do tamanho da seção crítica de outra tarefa, que ninguém controla."}
+        ],
+        result:{value:"8 µs", cls:"bad", text:"atraso da tarefa RT (do disparo do timer até rodar)"}
+      },
+      rt: {
+        label: "PREEMPT_RT",
+        segs: [
+          {row:2,t0:0,t1:3,kind:"run"},
+          {row:2,t0:3,t1:5,kind:"crit"},
+          {row:1,t0:5,t1:5.6,kind:"irq"},
+          {row:0,t0:5.6,t1:9.6,kind:"run"},
+          {row:2,t0:9.6,t1:16,kind:"crit"},
+          {row:2,t0:16,t1:20,kind:"run"}
+        ],
+        arrows:[{row:0,t:5,label:"acorda"}],
+        steps:[
+          {t:3, text:"A tarefa comum entra na mesma seção crítica, mas no PREEMPT_RT o spinlock virou rt_mutex: um lock que pode ser preemptado."},
+          {t:5, text:"O timer dispara. Só a parte mínima da interrupção roda com IRQs desligadas; o resto do trabalho vira thread com prioridade."},
+          {t:5.6, text:"A tarefa RT preempta a tarefa comum imediatamente, mesmo dentro do kernel."},
+          {t:9.6, text:"A tarefa RT terminou o trabalho do período. A tarefa comum continua de onde parou."},
+          {t:20, text:"Resultado: o atraso não depende mais do que as outras tarefas fazem no kernel. A média quase não muda; o pior caso cai."}
+        ],
+        result:{value:"0,6 µs", cls:"good", text:"atraso da tarefa RT (do disparo do timer até rodar)"}
+      }
+    },
+    note:"No kernel real, as seções não preemptíveis que sobram no PREEMPT_RT são a parte superior das interrupções e os raw_spinlock_t."
+  },
+  pi: {
+    rows: ["H (alta)", "M (média)", "L (baixa)"],
+    tmax: 15,
+    modes: {
+      sem: {
+        label: "Sem herança de prioridade",
+        segs: [
+          {row:2,t0:0,t1:1,kind:"run"},
+          {row:2,t0:1,t1:2,kind:"crit"},
+          {row:1,t0:2,t1:4,kind:"run"},
+          {row:0,t0:4,t1:5,kind:"run"},
+          {row:0,t0:5,t1:10,kind:"blocked"},
+          {row:1,t0:5,t1:9,kind:"run"},
+          {row:2,t0:9,t1:10,kind:"crit"},
+          {row:0,t0:10,t1:13,kind:"crit"},
+          {row:2,t0:13,t1:14,kind:"run"}
+        ],
+        arrows:[{row:1,t:2,label:"chega"},{row:0,t:4,label:"chega"}],
+        steps:[
+          {t:1, text:"L (baixa prioridade) trava o recurso R."},
+          {t:2, text:"M chega e preempta L. L ainda segura R."},
+          {t:4, text:"H chega, preempta M e roda."},
+          {t:5, text:"H tenta travar R, que está com L. H dorme esperando."},
+          {t:9, text:"Inversão: M, que nem usa R, roda no lugar de H. Quanto mais M demorar, mais H espera."},
+          {t:10, text:"Só quando M termina, L volta, libera R e H continua."}
+        ],
+        result:{value:"5 u", cls:"bad", text:"tempo que H ficou bloqueada (sem limite: depende de M)"}
+      },
+      com: {
+        label: "Com herança (rt_mutex)",
+        segs: [
+          {row:2,t0:0,t1:1,kind:"run"},
+          {row:2,t0:1,t1:2,kind:"crit"},
+          {row:1,t0:2,t1:4,kind:"run"},
+          {row:0,t0:4,t1:5,kind:"run"},
+          {row:0,t0:5,t1:6,kind:"blocked"},
+          {row:2,t0:5,t1:6,kind:"crit",boost:true},
+          {row:0,t0:6,t1:9,kind:"crit"},
+          {row:1,t0:9,t1:13,kind:"run"},
+          {row:2,t0:13,t1:14,kind:"run"}
+        ],
+        arrows:[{row:1,t:2,label:"chega"},{row:0,t:4,label:"chega"}],
+        steps:[
+          {t:1, text:"L (baixa prioridade) trava o recurso R."},
+          {t:2, text:"M chega e preempta L. L ainda segura R."},
+          {t:4, text:"H chega, preempta M e roda."},
+          {t:5, text:"H tenta travar R. O rt_mutex empresta a prioridade de H para L."},
+          {t:6, text:"L, agora com prioridade alta, passa na frente de M, termina a seção crítica e libera R."},
+          {t:9, text:"H roda com R. M só volta depois. O bloqueio de H fica limitado à seção crítica de L."}
+        ],
+        result:{value:"1 u", cls:"good", text:"tempo que H ficou bloqueada (limitado pela seção crítica de L)"}
+      }
+    },
+    note:"O PREEMPT_RT troca mutexes e spinlocks do kernel por rt_mutex, que implementa herança de prioridade. Em espaço de usuário, use PTHREAD_PRIO_INHERIT."
+  }
+};
+
+const KIND = {
+  run:{fill:"var(--rt)", label:"executando"},
+  crit:{fill:"var(--crit)", label:"seção crítica (lock)"},
+  irq:{fill:"var(--irq)", label:"interrupção"},
+  blocked:{fill:"none", label:"pronta, mas esperando"}
+};
+
+let scen="lat", mode="comum", cur=0, stepIdx=-1, timer=null;
+const svg=document.getElementById("svg");
+const reduce=window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+function rowColor(sc,row,kind){
+  if(kind!=="run") return KIND[kind].fill;
+  if(sc==="lat") return row===0?"var(--rt)":"var(--normal)";
+  return row===0?"var(--rt)":(row===1?"var(--normal)":"var(--muted)");
+}
+
+function draw(){
+  const S=SCEN[scen], M=S.modes[mode];
+  const L=170, R=880, top=30, rh=72, W=R-L;
+  const x=t=>L+W*t/S.tmax;
+  let h=top+rh*S.rows.length+40;
+  svg.setAttribute("viewBox",`0 0 900 ${h}`);
+  let o="";
+  // linhas e rótulos
+  S.rows.forEach((name,i)=>{
+    const y=top+i*rh;
+    o+=`<line x1="${L}" y1="${y+rh-10}" x2="${R}" y2="${y+rh-10}" stroke="var(--line)"/>`;
+    o+=`<text x="10" y="${y+rh/2+4}" font-size="14" font-weight="600">${name}</text>`;
+  });
+  // eixo
+  for(let t=0;t<=S.tmax;t+=(S.tmax>16?2:1)){
+    o+=`<line x1="${x(t)}" y1="${top-6}" x2="${x(t)}" y2="${top+rh*S.rows.length-10}" stroke="var(--line)" stroke-dasharray="2 4"/>`;
+    o+=`<text x="${x(t)}" y="${top+rh*S.rows.length+12}" font-size="12" text-anchor="middle" fill="var(--muted)" style="fill:var(--muted)">${t}</text>`;
+  }
+  o+=`<text x="${R}" y="${top+rh*S.rows.length+30}" font-size="12" text-anchor="end" style="fill:var(--muted)">tempo (${scen==="lat"?"µs":"unidades"}, ilustrativo)</text>`;
+  // segmentos recortados pelo cursor
+  M.segs.forEach(s=>{
+    if(cur<=s.t0) return;
+    const t1=Math.min(s.t1,cur), y=top+s.row*rh+16, hh=rh-34;
+    if(s.kind==="blocked"){
+      o+=`<rect x="${x(s.t0)}" y="${y}" width="${x(t1)-x(s.t0)}" height="${hh}" fill="none" stroke="var(--bad)" stroke-width="2" stroke-dasharray="6 4" rx="4"/>`;
+    }else{
+      o+=`<rect x="${x(s.t0)}" y="${y}" width="${x(t1)-x(s.t0)}" height="${hh}" fill="${rowColor(scen,s.row,s.kind)}" rx="4"/>`;
+      if(s.boost && cur>s.t0) o+=`<text x="${x(s.t0)+4}" y="${y-4}" font-size="11" style="fill:var(--crit)">prioridade de H</text>`;
+    }
+  });
+  // chegadas
+  M.arrows.forEach(a=>{
+    if(cur<a.t) return;
+    const y=top+a.row*rh+8;
+    o+=`<path d="M${x(a.t)} ${y-6} L${x(a.t)} ${y+10}" stroke="var(--fg)" stroke-width="2"/>`;
+    o+=`<path d="M${x(a.t)-5} ${y+4} L${x(a.t)} ${y+11} L${x(a.t)+5} ${y+4}" fill="none" stroke="var(--fg)" stroke-width="2"/>`;
+    o+=`<text x="${x(a.t)+6}" y="${y+2}" font-size="11">${a.label}</text>`;
+  });
+  // cursor
+  if(cur>0 && cur<S.tmax) o+=`<line x1="${x(cur)}" y1="${top-10}" x2="${x(cur)}" y2="${top+rh*S.rows.length-6}" stroke="var(--cursor)" stroke-width="2"/>`;
+  svg.innerHTML=o;
+
+  // narração
+  const ol=document.getElementById("steps"); ol.innerHTML="";
+  M.steps.forEach((s,i)=>{
+    const li=document.createElement("li"); li.textContent=s.text;
+    if(cur>=s.t) li.className = (i===lastStep(M)?"now":"done");
+    ol.appendChild(li);
+  });
+  const res=document.getElementById("result");
+  const done=cur>=S.tmax;
+  res.innerHTML = done
+    ? `<span class="big ${M.result.cls}">${M.result.value}</span><span>${M.result.text}</span><small>Troque o modo acima para comparar.</small>`
+    : `<span class="big">…</span><span>Reproduza a animação para ver o resultado.</span><small>Modo: ${M.label}</small>`;
+  document.getElementById("note").textContent=S.note;
+}
+function lastStep(M){let k=-1;M.steps.forEach((s,i)=>{if(cur>=s.t)k=i});return k}
+
+function legend(){
+  const items = scen==="lat"
+    ? [["var(--rt)","tarefa RT executando"],["var(--normal)","tarefa comum executando"],["var(--crit)","seção crítica no kernel"],["var(--irq)","interrupção"]]
+    : [["var(--rt)","H executando"],["var(--normal)","M executando"],["var(--muted)","L executando"],["var(--crit)","segurando o recurso R"]];
+  let h=items.map(([c,t])=>`<span><i class="sw" style="background:${c}"></i>${t}</span>`).join("");
+  h+=`<span><i class="sw" style="border:2px dashed var(--bad)"></i>pronta, mas esperando</span>`;
+  document.getElementById("legend").innerHTML=h;
+}
+
+function modesUI(){
+  const box=document.getElementById("modes"); box.innerHTML="";
+  Object.entries(SCEN[scen].modes).forEach(([k,m])=>{
+    const b=document.createElement("button"); b.textContent=m.label; b.id="mode-"+k;
+    b.setAttribute("aria-pressed", String(k===mode));
+    b.onclick=()=>{mode=k; stop(); cur=0; modesUI(); draw();};
+    box.appendChild(b);
+  });
+}
+function stop(){ if(timer){clearInterval(timer);timer=null} document.getElementById("b-play").textContent="Reproduzir"; }
+function play(){
+  const S=SCEN[scen];
+  if(timer){stop();return}
+  if(cur>=S.tmax) cur=0;
+  if(reduce){cur=S.tmax;draw();return}
+  document.getElementById("b-play").textContent="Pausar";
+  timer=setInterval(()=>{cur=Math.min(S.tmax,cur+S.tmax/240);draw(); if(cur>=S.tmax)stop();},25);
+}
+function step(){
+  stop(); const M=SCEN[scen].modes[mode], S=SCEN[scen];
+  const next=M.steps.find(s=>s.t>cur+1e-9);
+  cur = next? next.t : S.tmax; draw();
+}
+function setScen(s){
+  scen=s; mode=Object.keys(SCEN[s].modes)[0]; cur=0; stop();
+  document.getElementById("tab-lat").setAttribute("aria-selected",String(s==="lat"));
+  document.getElementById("tab-pi").setAttribute("aria-selected",String(s==="pi"));
+  modesUI(); legend(); draw();
+}
+document.getElementById("tab-lat").onclick=()=>setScen("lat");
+document.getElementById("tab-pi").onclick=()=>setScen("pi");
+document.getElementById("b-play").onclick=play;
+document.getElementById("b-step").onclick=step;
+document.getElementById("b-reset").onclick=()=>{stop();cur=0;draw();};
+setScen("lat");
+</script>
+
+</body>
+</html>
