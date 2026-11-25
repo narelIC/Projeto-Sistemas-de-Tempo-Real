@@ -7,6 +7,9 @@
  * Compilar:  gcc -O2 -Wall -o rt_periodic rt_periodic.c
  * Rodar RT:  sudo ./rt_periodic 1000 10000 rt     (período 1000 us, 10000 ciclos, SCHED_FIFO 80)
  * Rodar comum: ./rt_periodic 1000 10000 normal    (SCHED_OTHER, para comparar)
+ * Opcional:  sudo ./rt_periodic 1000 2050 rt 1 lat.csv
+ *            (presa ao núcleo 1; grava cada latência em lat.csv; as 50 primeiras
+ *             ativações são aquecimento e ficam fora da média e do máximo)
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -40,6 +43,20 @@ int main(int argc, char **argv)
     long period_us = argc > 1 ? atol(argv[1]) : 1000;
     long cycles    = argc > 2 ? atol(argv[2]) : 10000;
     int  use_rt    = argc > 3 ? strcmp(argv[3], "normal") != 0 : 1;
+    int  cpu       = argc > 4 ? atoi(argv[4]) : -1;
+    FILE *csv      = argc > 5 ? fopen(argv[5], "w") : NULL;
+    const long aquecimento = 50;
+
+    if (cpu >= 0) {   /* mesma CPU da carga: é ali que o bloqueio acontece */
+        cpu_set_t cpus;
+        CPU_ZERO(&cpus);
+        CPU_SET(cpu, &cpus);
+        if (sched_setaffinity(0, sizeof(cpus), &cpus) != 0) {
+            perror("sched_setaffinity");
+            return 1;
+        }
+    }
+    if (csv) fprintf(csv, "ativacao,latencia_us\n");
 
     if (use_rt) {
         /* 1) Prioridade fixa: SCHED_FIFO (escalonamento por prioridade fixa visto em aula) */
@@ -56,7 +73,7 @@ int main(int argc, char **argv)
     }
 
     struct timespec next, now;
-    long max_ns = 0, sum_ns = 0, misses = 0;
+    long max_ns = 0, sum_ns = 0, misses = 0, medidas = 0;
     long deadline_ns = period_us * 1000 / 10;   /* tolerância: 10% do período */
 
     clock_gettime(CLOCK_MONOTONIC, &next);
@@ -67,16 +84,21 @@ int main(int argc, char **argv)
 
         clock_gettime(CLOCK_MONOTONIC, &now);
         long lat = ts_diff_ns(&now, &next);      /* atraso da ativação */
-        if (lat > max_ns) max_ns = lat;
-        if (lat > deadline_ns) misses++;
-        sum_ns += lat;
+        if (i >= aquecimento || cycles <= aquecimento) {
+            if (lat > max_ns) max_ns = lat;
+            if (lat > deadline_ns) misses++;
+            sum_ns += lat;
+            medidas++;
+            if (csv) fprintf(csv, "%ld,%.2f\n", i, lat / 1000.0);
+        }
 
         control_job();
     }
 
     printf("modo=%s periodo=%ldus ciclos=%ld\n", use_rt ? "SCHED_FIFO" : "SCHED_OTHER",
-           period_us, cycles);
+           period_us, medidas);
     printf("latencia media = %.1f us | maxima observada = %.1f us | ativacoes > %ld us: %ld\n",
-           sum_ns / (double)cycles / 1000.0, max_ns / 1000.0, deadline_ns / 1000, misses);
+           sum_ns / (double)medidas / 1000.0, max_ns / 1000.0, deadline_ns / 1000, misses);
+    if (csv) fclose(csv);
     return 0;
 }
